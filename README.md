@@ -53,7 +53,7 @@ invalid sequences with `U+FFFD` (`���`). If you need non-ASCII content, ei
 - send from PowerShell with `Invoke-RestMethod` after explicit UTF-8 encoding:
 
   ```pwsh
-  $body = @{ userInput = "([好奇]張望)這裡是哪？"; intent = "action" } | ConvertTo-Json -Compress
+  $body = @{ userInput = "([curious]glance around)Where am I?"; intent = "action" } | ConvertTo-Json -Compress
   $bytes = [System.Text.Encoding]::UTF8.GetBytes($body)
   Invoke-RestMethod -Uri http://127.0.0.1:5051/send -Method Post `
     -ContentType 'application/json; charset=utf-8' -Body $bytes
