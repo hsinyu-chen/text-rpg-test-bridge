@@ -116,6 +116,38 @@ app.MapPost("/reload", async (HttpContext ctx, BridgeState s) =>
     return await s.EnqueueAsync("reload", body, ctx.RequestAborted);
 });
 
+// Profile mgmt — list / inspect-active / switch.
+app.MapPost("/profile/list", async (HttpContext ctx, BridgeState s) =>
+{
+    var body = await ReadJsonObject(ctx);
+    return await s.EnqueueAsync("profile_list", body, ctx.RequestAborted);
+});
+
+app.MapPost("/profile/active", async (HttpContext ctx, BridgeState s) =>
+{
+    var body = await ReadJsonObject(ctx);
+    return await s.EnqueueAsync("profile_get_active", body, ctx.RequestAborted);
+});
+
+app.MapPost("/profile/switch", async (HttpContext ctx, BridgeState s) =>
+{
+    var body = await ReadJsonObject(ctx);
+    return await s.EnqueueAsync("profile_switch", body, ctx.RequestAborted);
+});
+
+// Engine config — read or set engineMode + outputLanguage from outside the UI.
+app.MapPost("/config/get", async (HttpContext ctx, BridgeState s) =>
+{
+    var body = await ReadJsonObject(ctx);
+    return await s.EnqueueAsync("config_get", body, ctx.RequestAborted);
+});
+
+app.MapPost("/config/set", async (HttpContext ctx, BridgeState s) =>
+{
+    var body = await ReadJsonObject(ctx);
+    return await s.EnqueueAsync("config_set", body, ctx.RequestAborted);
+});
+
 app.Map("/app", async (HttpContext ctx, BridgeState s) =>
 {
     if (ctx.Connection.LocalPort != wssPort)
@@ -174,7 +206,10 @@ sealed class BridgeState(int wssPort)
     private readonly SemaphoreSlim _slot = new(1, 1);
     private int _queueDepth;
     private const int MaxQueue = 5;
-    private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(120);
+    // Two-call mode (resolver + narrator) on a slow local model can run 3-5
+    // minutes; raise the WS round-trip ceiling so the agent doesn't have to
+    // poll just to wait out a single turn.
+    private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(600);
     public int WssPort { get; } = wssPort;
 
     public async Task<IResult> EnqueueAsync(string type, JsonObject payload, CancellationToken ct)
