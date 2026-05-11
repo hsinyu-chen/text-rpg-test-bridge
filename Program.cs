@@ -148,6 +148,22 @@ app.MapPost("/config/set", async (HttpContext ctx, BridgeState s) =>
     return await s.EnqueueAsync("config_set", body, ctx.RequestAborted);
 });
 
+// Knowledge-base files — list loaded files / read one. The app holds the
+// active book's KB in memory (state.loadedFiles); these endpoints surface
+// it so an agent can inspect the same content the engine sees, without
+// poking IndexedDB or the disk-sync layer.
+app.MapPost("/kb/list", async (HttpContext ctx, BridgeState s) =>
+{
+    var body = await ReadJsonObject(ctx);
+    return await s.EnqueueAsync("kb_list", body, ctx.RequestAborted);
+});
+
+app.MapPost("/kb/read", async (HttpContext ctx, BridgeState s) =>
+{
+    var body = await ReadJsonObject(ctx);
+    return await s.EnqueueAsync("kb_read", body, ctx.RequestAborted);
+});
+
 app.Map("/app", async (HttpContext ctx, BridgeState s) =>
 {
     if (ctx.Connection.LocalPort != wssPort)
