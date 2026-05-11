@@ -158,6 +158,16 @@ app.MapPost("/llm/switch", async (HttpContext ctx, BridgeState s) =>
     return await s.EnqueueAsync("llm_switch", body, ctx.RequestAborted);
 });
 
+// Book KB recovery — fill in scenario files the active Book never loaded.
+// Only adds missing filenames per the named scenario; existing KB entries
+// are preserved. Use when scenarios.json had stale filenames at book-create
+// time and the engine silently dropped the 404s.
+app.MapPost("/book/repair-kb", async (HttpContext ctx, BridgeState s) =>
+{
+    var body = await ReadJsonObject(ctx);
+    return await s.EnqueueAsync("book_repair_kb", body, ctx.RequestAborted);
+});
+
 // Engine config — read or set engineMode + outputLanguage from outside the UI.
 app.MapPost("/config/get", async (HttpContext ctx, BridgeState s) =>
 {
