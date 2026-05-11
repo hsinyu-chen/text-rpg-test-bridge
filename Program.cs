@@ -164,6 +164,33 @@ app.MapPost("/kb/read", async (HttpContext ctx, BridgeState s) =>
     return await s.EnqueueAsync("kb_read", body, ctx.RequestAborted);
 });
 
+// Book mgmt — list books, inspect-active, fork active to a new sibling Book
+// truncated at a message, switch active. Symmetric with /profile/* — book
+// switching is the playthrough-level analogue of profile switching.
+app.MapPost("/book/list", async (HttpContext ctx, BridgeState s) =>
+{
+    var body = await ReadJsonObject(ctx);
+    return await s.EnqueueAsync("book_list", body, ctx.RequestAborted);
+});
+
+app.MapPost("/book/active", async (HttpContext ctx, BridgeState s) =>
+{
+    var body = await ReadJsonObject(ctx);
+    return await s.EnqueueAsync("book_get_active", body, ctx.RequestAborted);
+});
+
+app.MapPost("/book/fork", async (HttpContext ctx, BridgeState s) =>
+{
+    var body = await ReadJsonObject(ctx);
+    return await s.EnqueueAsync("book_fork", body, ctx.RequestAborted);
+});
+
+app.MapPost("/book/switch", async (HttpContext ctx, BridgeState s) =>
+{
+    var body = await ReadJsonObject(ctx);
+    return await s.EnqueueAsync("book_switch", body, ctx.RequestAborted);
+});
+
 app.Map("/app", async (HttpContext ctx, BridgeState s) =>
 {
     if (ctx.Connection.LocalPort != wssPort)
@@ -181,7 +208,7 @@ app.Map("/app", async (HttpContext ctx, BridgeState s) =>
     await s.HandleAppConnectionAsync(ws, ctx.RequestAborted);
 });
 
-Console.WriteLine($"[bridge] http  listening on http://127.0.0.1:{httpPort}  (agent → /send /list /delete /reload)");
+Console.WriteLine($"[bridge] http  listening on http://127.0.0.1:{httpPort}  (agent → /send /list /delete /reload /book/*)");
 Console.WriteLine($"[bridge] wss   listening on wss://127.0.0.1:{wssPort}/app  (app  → WebSocket)");
 Console.WriteLine($"[bridge] cert  {certPath}");
 
