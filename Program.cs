@@ -135,6 +135,29 @@ app.MapPost("/profile/switch", async (HttpContext ctx, BridgeState s) =>
     return await s.EnqueueAsync("profile_switch", body, ctx.RequestAborted);
 });
 
+// LLM profile mgmt — list / active / switch. Distinct from prompt profiles:
+// these select which model + API the engine calls (local llama.cpp vs Gemini /
+// OpenAI / etc). Switching to a non-local profile via /llm/switch requires
+// `confirmPaid: true` in the body — guards against accidentally driving turns
+// through a paid model.
+app.MapPost("/llm/list", async (HttpContext ctx, BridgeState s) =>
+{
+    var body = await ReadJsonObject(ctx);
+    return await s.EnqueueAsync("llm_list", body, ctx.RequestAborted);
+});
+
+app.MapPost("/llm/active", async (HttpContext ctx, BridgeState s) =>
+{
+    var body = await ReadJsonObject(ctx);
+    return await s.EnqueueAsync("llm_get_active", body, ctx.RequestAborted);
+});
+
+app.MapPost("/llm/switch", async (HttpContext ctx, BridgeState s) =>
+{
+    var body = await ReadJsonObject(ctx);
+    return await s.EnqueueAsync("llm_switch", body, ctx.RequestAborted);
+});
+
 // Engine config — read or set engineMode + outputLanguage from outside the UI.
 app.MapPost("/config/get", async (HttpContext ctx, BridgeState s) =>
 {
