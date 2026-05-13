@@ -140,6 +140,22 @@ app.MapPost("/profile/switch", async (HttpContext ctx, BridgeState s) =>
     return await s.EnqueueAsync("profile_switch", body, ctx.RequestAborted);
 });
 
+// Disk sync for active user-defined profile. Pull reads the bound FSA folder
+// into IDB then triggers injection.forceReload(); push writes IDB out to disk.
+// Built-in profiles are rejected by the app side. Use to drive prompt-tuning
+// A/B loops without asking the user to click the UI sync button each round.
+app.MapPost("/profile/pull-from-disk", async (HttpContext ctx, BridgeState s) =>
+{
+    var body = await ReadJsonObject(ctx);
+    return await s.EnqueueAsync("profile_pull_from_disk", body, ctx.RequestAborted);
+});
+
+app.MapPost("/profile/push-to-disk", async (HttpContext ctx, BridgeState s) =>
+{
+    var body = await ReadJsonObject(ctx);
+    return await s.EnqueueAsync("profile_push_to_disk", body, ctx.RequestAborted);
+});
+
 // LLM profile mgmt — list / active / switch. Distinct from prompt profiles:
 // these select which model + API the engine calls (local llama.cpp vs Gemini /
 // OpenAI / etc). Switching to a non-local profile via /llm/switch requires
