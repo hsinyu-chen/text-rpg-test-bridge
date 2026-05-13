@@ -163,6 +163,21 @@ app.MapPost("/llm/switch", async (HttpContext ctx, BridgeState s) =>
     return await s.EnqueueAsync("llm_switch", body, ctx.RequestAborted);
 });
 
+// File-agent LLM profile (separate axis from chat-side /llm/active+switch).
+// Lets agents A/B-test different models on the file-agent without touching
+// the UI's Settings dialog.
+app.MapPost("/file-agent/active", async (HttpContext ctx, BridgeState s) =>
+{
+    var body = await ReadJsonObject(ctx);
+    return await s.EnqueueAsync("file_agent_get_profile", body, ctx.RequestAborted);
+});
+
+app.MapPost("/file-agent/switch", async (HttpContext ctx, BridgeState s) =>
+{
+    var body = await ReadJsonObject(ctx);
+    return await s.EnqueueAsync("file_agent_set_profile", body, ctx.RequestAborted);
+});
+
 // Book KB recovery — fill in scenario files the active Book never loaded.
 // Only adds missing filenames per the named scenario; existing KB entries
 // are preserved. Use when scenarios.json had stale filenames at book-create
