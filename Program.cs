@@ -33,12 +33,12 @@ for (int i = 0; i < args.Length; i++)
 // `dotnet run` puts cwd at the project folder, but a published exe lives several dirs deeper,
 // so we try both and pick the first that has both PEM files.
 string[] candidates = certDirOverride is not null
-    ? new[] { certDirOverride }
-    : new[]
-    {
+    ? [certDirOverride]
+    :
+    [
         Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, "..", "TextRPG", ".certs")),
         Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "TextRPG", ".certs")),
-    };
+    ];
 
 string? certDir = null;
 string? certPath = null;
@@ -115,6 +115,11 @@ app.MapPost("/reload", async (HttpContext ctx, BridgeState s) =>
     var body = await ReadJsonObject(ctx);
     return await s.EnqueueAsync("reload", body, ctx.RequestAborted);
 });
+
+// Multi-client introspection — list currently-connected clientIds. Use to
+// disambiguate when the agent is unsure which environment is live.
+app.MapGet("/clients", (BridgeState s) =>
+    Results.Json(new { clients = s.ListClients() }));
 
 // Profile mgmt — list / inspect-active / switch.
 app.MapPost("/profile/list", async (HttpContext ctx, BridgeState s) =>
@@ -224,6 +229,82 @@ app.MapPost("/book/switch", async (HttpContext ctx, BridgeState s) =>
     return await s.EnqueueAsync("book_switch", body, ctx.RequestAborted);
 });
 
+// File-agent UI surface controls — open the file-viewer dialog with the
+// agent panel pre-opened, or pop the chat-side agent panel. Both are dev-
+// only convenience hooks so an outside agent (Claude via /dev-bridge) can
+// drive the user to the in-app file-agent surface for handbook validation.
+app.MapPost("/agent/open-file-viewer", async (HttpContext ctx, BridgeState s) =>
+{
+    var body = await ReadJsonObject(ctx);
+    return await s.EnqueueAsync("agent_open_file_viewer", body, ctx.RequestAborted);
+});
+
+app.MapPost("/agent/open-chat-agent-panel", async (HttpContext ctx, BridgeState s) =>
+{
+    var body = await ReadJsonObject(ctx);
+    return await s.EnqueueAsync("agent_open_chat_agent_panel", body, ctx.RequestAborted);
+});
+
+// Push a prompt into the visible chat-side agent panel input (opens panel
+// if closed) and optionally auto-send via runAgent. Complements `agent_ask`
+// for the "drive the visible UI so a human can watch" path; headless
+// `agent_ask` returns the full log to the caller without touching the UI.
+app.MapPost("/agent/fill-chat-panel-prompt", async (HttpContext ctx, BridgeState s) =>
+{
+    var body = await ReadJsonObject(ctx);
+    return await s.EnqueueAsync("agent_fill_chat_panel_prompt", body, ctx.RequestAborted);
+});
+
+// Snapshot of which AgentHintRegistry paths are physically attached (directive
+// mounted) vs. waiting for a parent dialog/panel to open. Use to verify a
+// template wiring change — a directive that didn't mount leaves its path in
+// `unmounted` even when the UI region is on-screen.
+app.MapPost("/agent/get-hints", async (HttpContext ctx, BridgeState s) =>
+{
+    var body = await ReadJsonObject(ctx);
+    return await s.EnqueueAsync("agent_get_hints", body, ctx.RequestAborted);
+});
+
+// Headless equivalent of clicking an app://hint/<path> link inside the agent
+// console — runs the registry's openTarget(path, action). Response is the
+// registry's verdict: ok=true if the element was visible+actioned, or
+// ok=false with reason='unknown'|'unreachable' (+ breadcrumb on unreachable).
+app.MapPost("/agent/trigger-hint", async (HttpContext ctx, BridgeState s) =>
+{
+    var body = await ReadJsonObject(ctx);
+    return await s.EnqueueAsync("agent_trigger_hint", body, ctx.RequestAborted);
+});
+
+// Returns getBoundingClientRect() for a path's mounted element + viewport
+// size. Used to mechanically verify that (a) a directive is wired to the
+// expected element, and (b) after manual navigation, the element actually
+// shifted into the viewport.
+app.MapPost("/agent/get-hint-bbox", async (HttpContext ctx, BridgeState s) =>
+{
+    var body = await ReadJsonObject(ctx);
+    return await s.EnqueueAsync("agent_get_hint_bbox", body, ctx.RequestAborted);
+});
+
+// Dev-only JS eval inside the running app. The Angular side gates it by
+// isDevMode() (same as the rest of the bridge). Pass `expr` as a JS
+// expression OR a block ending in `return`; result is JSON-serialized
+// with DOM nodes turned into {tag, id, classes} stubs.
+app.MapPost("/agent/eval", async (HttpContext ctx, BridgeState s) =>
+{
+    var body = await ReadJsonObject(ctx);
+    return await s.EnqueueAsync("agent_eval", body, ctx.RequestAborted);
+});
+
+// Headless file-agent driver — send a prompt, get back the full agent log
+// (tool calls, results, thoughts, final submitResponse text). Runs against
+// the active book's KB + chat snapshot in a dedicated FileAgentService
+// instance; the sidebar / file-viewer instances are not affected.
+app.MapPost("/agent/ask", async (HttpContext ctx, BridgeState s) =>
+{
+    var body = await ReadJsonObject(ctx);
+    return await s.EnqueueAsync("agent_ask", body, ctx.RequestAborted);
+});
+
 app.Map("/app", async (HttpContext ctx, BridgeState s) =>
 {
     if (ctx.Connection.LocalPort != wssPort)
@@ -241,8 +322,8 @@ app.Map("/app", async (HttpContext ctx, BridgeState s) =>
     await s.HandleAppConnectionAsync(ws, ctx.RequestAborted);
 });
 
-Console.WriteLine($"[bridge] http  listening on http://127.0.0.1:{httpPort}  (agent → /send /list /delete /reload /book/*)");
-Console.WriteLine($"[bridge] wss   listening on wss://127.0.0.1:{wssPort}/app  (app  → WebSocket)");
+Console.WriteLine($"[bridge] http  listening on http://127.0.0.1:{httpPort}  (agent → /send /list /delete /reload /clients /book/*)");
+Console.WriteLine($"[bridge] wss   listening on wss://127.0.0.1:{wssPort}/app  (app  → WebSocket; multi-client by hello frame's clientId)");
 Console.WriteLine($"[bridge] cert  {certPath}");
 
 await app.RunAsync();
@@ -276,11 +357,11 @@ static void PrintUsage()
 
 sealed class BridgeState(int wssPort)
 {
-    private readonly object _lock = new();
-    private WebSocket? _activeWs;
-    private readonly ConcurrentDictionary<string, TaskCompletionSource<JsonNode>> _pending = new();
-    private readonly SemaphoreSlim _slot = new(1, 1);
-    private int _queueDepth;
+    private readonly ConcurrentDictionary<string, ClientConn> _clients = new();
+    // requestId → (owner clientId, tcs). Owner tagging prevents a different
+    // client from accidentally resolving another's pending response after a
+    // clientId-collision replace.
+    private readonly ConcurrentDictionary<string, PendingReq> _pending = new();
     private const int MaxQueue = 5;
     // Two-call mode (resolver + narrator) on a slow local model can run 3-5
     // minutes; raise the WS round-trip ceiling so the agent doesn't have to
@@ -288,43 +369,69 @@ sealed class BridgeState(int wssPort)
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(600);
     public int WssPort { get; } = wssPort;
 
+    public string[] ListClients() =>
+        _clients.Keys.OrderBy(s => s, StringComparer.Ordinal).ToArray();
+
     public async Task<IResult> EnqueueAsync(string type, JsonObject payload, CancellationToken ct)
     {
+        // Resolve target client. Explicit clientId in payload wins; otherwise
+        // single-connection convenience routing.
+        var requestedId = payload["clientId"]?.GetValue<string>()?.Trim();
+        ClientConn? conn;
+        string clientId;
+        if (!string.IsNullOrEmpty(requestedId))
+        {
+            if (!_clients.TryGetValue(requestedId, out conn))
+                return Results.Json(new { error = "client_not_connected", clientId = requestedId }, statusCode: 503);
+            clientId = requestedId;
+        }
+        else
+        {
+            var snapshot = _clients.ToArray();
+            if (snapshot.Length == 0)
+                return Results.Json(new { error = "app_not_connected" }, statusCode: 503);
+            if (snapshot.Length > 1)
+                return Results.Json(new
+                {
+                    error = "client_id_required",
+                    clients = snapshot.Select(kv => kv.Key).OrderBy(s => s, StringComparer.Ordinal).ToArray()
+                }, statusCode: 400);
+            clientId = snapshot[0].Key;
+            conn = snapshot[0].Value;
+        }
+
         bool counted = false;
         try
         {
-            lock (_lock)
+            var depth = Interlocked.Increment(ref conn.QueueDepth);
+            if (depth > MaxQueue)
             {
-                if (_activeWs is null || _activeWs.State != WebSocketState.Open)
-                    return Results.Json(new { error = "app_not_connected" }, statusCode: 503);
-                if (_queueDepth >= MaxQueue)
-                    return Results.Json(new { error = "queue_full" }, statusCode: 429);
-                _queueDepth++;
-                counted = true;
+                Interlocked.Decrement(ref conn.QueueDepth);
+                return Results.Json(new { error = "queue_full", clientId }, statusCode: 429);
             }
+            counted = true;
 
-            await _slot.WaitAsync(ct);
+            await conn.Slot.WaitAsync(ct);
             try
             {
-                WebSocket? ws;
-                lock (_lock) ws = _activeWs;
-                if (ws is null || ws.State != WebSocketState.Open)
-                    return Results.Json(new { error = "app_not_connected" }, statusCode: 503);
+                // Re-verify liveness — client could replace/disconnect while we waited.
+                if (!_clients.TryGetValue(clientId, out var live) || live != conn || conn.Ws.State != WebSocketState.Open)
+                    return Results.Json(new { error = "client_not_connected", clientId }, statusCode: 503);
 
                 var requestId = Guid.NewGuid().ToString("N");
                 var msg = new JsonObject { ["type"] = type, ["requestId"] = requestId };
                 foreach (var kv in payload)
                 {
-                    if (kv.Key is "type" or "requestId") continue;
+                    if (kv.Key is "type" or "requestId" or "clientId") continue;
                     msg[kv.Key] = kv.Value?.DeepClone();
                 }
 
                 var tcs = new TaskCompletionSource<JsonNode>(TaskCreationOptions.RunContinuationsAsynchronously);
-                _pending[requestId] = tcs;
+                _pending[requestId] = new PendingReq(clientId, tcs);
                 try
                 {
                     var bytes = Encoding.UTF8.GetBytes(msg.ToJsonString());
-                    await ws.SendAsync(bytes, WebSocketMessageType.Text, true, ct);
+                    await conn.Ws.SendAsync(bytes, WebSocketMessageType.Text, true, ct);
 
                     using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
                     cts.CancelAfter(RequestTimeout);
@@ -338,21 +445,18 @@ sealed class BridgeState(int wssPort)
                     catch (OperationCanceledException)
                     {
                         if (ct.IsCancellationRequested) throw;
-                        // App could have disconnected mid-flight; surface a clearer code.
-                        WebSocket? still;
-                        lock (_lock) still = _activeWs;
-                        if (still is null || still.State != WebSocketState.Open)
-                            return Results.Json(new { error = "app_not_connected" }, statusCode: 503);
-                        return Results.Json(new { error = "app_timeout" }, statusCode: 504);
+                        if (!_clients.TryGetValue(clientId, out var still) || still.Ws.State != WebSocketState.Open)
+                            return Results.Json(new { error = "client_not_connected", clientId }, statusCode: 503);
+                        return Results.Json(new { error = "app_timeout", clientId }, statusCode: 504);
                     }
 
                     var responseType = response["type"]?.GetValue<string>();
                     if (responseType == "action_error")
                     {
                         var detail = response["error"]?.GetValue<string>() ?? "unknown";
-                        if (detail == "app_disconnected")
-                            return Results.Json(new { error = "app_not_connected" }, statusCode: 503);
-                        return Results.Json(new { error = "app_error", detail }, statusCode: 500);
+                        if (detail is "app_disconnected" or "client_replaced")
+                            return Results.Json(new { error = "client_not_connected", clientId, reason = detail }, statusCode: 503);
+                        return Results.Json(new { error = "app_error", detail, clientId }, statusCode: 500);
                     }
 
                     if (response is JsonObject obj)
@@ -370,29 +474,22 @@ sealed class BridgeState(int wssPort)
             }
             finally
             {
-                _slot.Release();
+                conn.Slot.Release();
             }
         }
         finally
         {
-            if (counted) Interlocked.Decrement(ref _queueDepth);
+            if (counted) Interlocked.Decrement(ref conn.QueueDepth);
         }
     }
 
     public async Task HandleAppConnectionAsync(WebSocket ws, CancellationToken ct)
     {
-        WebSocket? old;
-        lock (_lock)
-        {
-            old = _activeWs;
-            _activeWs = ws;
-        }
-        if (old is not null)
-        {
-            try { await old.CloseAsync(WebSocketCloseStatus.NormalClosure, "replaced", CancellationToken.None); }
-            catch { }
-        }
-        Console.WriteLine("[bridge] app connected");
+        // clientId is learned from the first hello frame. Until then frames
+        // are still processed but registration is deferred so legacy apps
+        // without a hello collapse to a 'default' bucket on first real frame.
+        string clientId = "default";
+        ClientConn? conn = null;
 
         var buffer = new byte[64 * 1024];
         var sb = new StringBuilder();
@@ -417,42 +514,103 @@ sealed class BridgeState(int wssPort)
                 if (sb.Length == 0) continue;
                 JsonNode? node;
                 try { node = JsonNode.Parse(sb.ToString()); }
-                catch { Console.WriteLine($"[bridge] invalid json from app: {sb}"); continue; }
+                catch { Console.WriteLine($"[bridge] invalid json from {clientId}: {sb}"); continue; }
                 if (node is null) continue;
 
                 var type = node["type"]?.GetValue<string>();
+
+                if (type == "hello")
+                {
+                    if (conn != null)
+                    {
+                        // Re-hello on an active connection: ignored (clientId is sticky for the connection's lifetime).
+                        Console.WriteLine($"[bridge] late hello from {clientId} ignored");
+                        continue;
+                    }
+                    var id = node["clientId"]?.GetValue<string>()?.Trim();
+                    if (!string.IsNullOrEmpty(id)) clientId = id;
+                    conn = await RegisterClientAsync(clientId, ws);
+                    Console.WriteLine($"[bridge] app connected: {clientId}");
+                    continue;
+                }
+
+                // Legacy app — no hello, register on first real frame.
+                if (conn == null)
+                {
+                    conn = await RegisterClientAsync(clientId, ws);
+                    Console.WriteLine($"[bridge] app connected (no hello): {clientId}");
+                }
+
                 switch (type)
                 {
                     case "heartbeat":
                         break;
-                    case "hello":
-                        Console.WriteLine($"[bridge] hello: {node.ToJsonString()}");
-                        break;
                     default:
                         var requestId = node["requestId"]?.GetValue<string>();
-                        if (requestId is not null && _pending.TryGetValue(requestId, out var tcs))
+                        if (requestId is not null && _pending.TryGetValue(requestId, out var pending))
                         {
-                            tcs.TrySetResult(node);
+                            // Only the owner's response is honored — guards against
+                            // a replacement client surfacing the prior owner's frames.
+                            if (pending.ClientId == clientId)
+                                pending.Tcs.TrySetResult(node);
+                            else
+                                Console.WriteLine($"[bridge] response from {clientId} for {pending.ClientId}'s request, dropped");
                         }
                         else
                         {
-                            Console.WriteLine($"[bridge] unmatched frame: {sb}");
+                            Console.WriteLine($"[bridge] unmatched frame from {clientId}: {sb}");
                         }
                         break;
                 }
             }
         }
         catch (OperationCanceledException) { }
-        catch (WebSocketException e) { Console.WriteLine($"[bridge] ws closed: {e.WebSocketErrorCode}"); }
-        catch (Exception e) { Console.WriteLine($"[bridge] ws error: {e.Message}"); }
+        catch (WebSocketException e) { Console.WriteLine($"[bridge] ws closed ({clientId}): {e.WebSocketErrorCode}"); }
+        catch (Exception e) { Console.WriteLine($"[bridge] ws error ({clientId}): {e.Message}"); }
         finally
         {
-            lock (_lock) { if (_activeWs == ws) _activeWs = null; }
-            // Surface disconnect to any in-flight request as a synthetic error frame.
-            var disconnectFrame = new JsonObject { ["type"] = "action_error", ["error"] = "app_disconnected" };
-            foreach (var kv in _pending)
-                kv.Value.TrySetResult(disconnectFrame.DeepClone());
-            Console.WriteLine("[bridge] app disconnected");
+            if (conn != null)
+            {
+                // Only remove if this conn is still the registered one (a same-id
+                // replacement already swapped it out and we shouldn't clobber that).
+                _clients.TryRemove(new KeyValuePair<string, ClientConn>(conn.ClientId, conn));
+                FailPendingForClient(conn.ClientId, "app_disconnected");
+                Console.WriteLine($"[bridge] app disconnected: {conn.ClientId}");
+            }
+        }
+    }
+
+    private async Task<ClientConn> RegisterClientAsync(string clientId, WebSocket ws)
+    {
+        var conn = new ClientConn { Ws = ws, ClientId = clientId };
+        ClientConn? old = null;
+        _clients.AddOrUpdate(clientId, conn, (_, existing) => { old = existing; return conn; });
+        if (old is not null)
+        {
+            try { await old.Ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "replaced", CancellationToken.None); }
+            catch { }
+            FailPendingForClient(clientId, "client_replaced");
+        }
+        return conn;
+    }
+
+    private void FailPendingForClient(string clientId, string reason)
+    {
+        var frame = new JsonObject { ["type"] = "action_error", ["error"] = reason };
+        foreach (var kv in _pending.ToArray())
+        {
+            if (kv.Value.ClientId == clientId)
+                kv.Value.Tcs.TrySetResult(frame.DeepClone());
         }
     }
 }
+
+sealed class ClientConn
+{
+    public required WebSocket Ws { get; init; }
+    public required string ClientId { get; init; }
+    public readonly SemaphoreSlim Slot = new(1, 1);
+    public int QueueDepth;
+}
+
+sealed record PendingReq(string ClientId, TaskCompletionSource<JsonNode> Tcs);
