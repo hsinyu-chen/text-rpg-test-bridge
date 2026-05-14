@@ -156,6 +156,29 @@ app.MapPost("/profile/push-to-disk", async (HttpContext ctx, BridgeState s) =>
     return await s.EnqueueAsync("profile_push_to_disk", body, ctx.RequestAborted);
 });
 
+// Direct prompt-row read/write on a profile's IDB store. Canonical path for
+// AI-driven prompt tuning A/B — bypasses the FSA disk-sync layer (no
+// permission dialog, no per-session manual seed). Set targets the active
+// user-defined profile and auto-fires injection.forceReload(); Get reads
+// any profile by id (defaults to active).
+app.MapPost("/profile/get-prompt", async (HttpContext ctx, BridgeState s) =>
+{
+    var body = await ReadJsonObject(ctx);
+    return await s.EnqueueAsync("profile_get_prompt", body, ctx.RequestAborted);
+});
+
+app.MapPost("/profile/get-all-prompts", async (HttpContext ctx, BridgeState s) =>
+{
+    var body = await ReadJsonObject(ctx);
+    return await s.EnqueueAsync("profile_get_all_prompts", body, ctx.RequestAborted);
+});
+
+app.MapPost("/profile/set-prompt", async (HttpContext ctx, BridgeState s) =>
+{
+    var body = await ReadJsonObject(ctx);
+    return await s.EnqueueAsync("profile_set_prompt", body, ctx.RequestAborted);
+});
+
 // LLM profile mgmt — list / active / switch. Distinct from prompt profiles:
 // these select which model + API the engine calls (local llama.cpp vs Gemini /
 // OpenAI / etc). Switching to a non-local profile via /llm/switch requires
