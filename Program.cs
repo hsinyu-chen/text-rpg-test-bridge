@@ -1,11 +1,9 @@
 using System.Collections.Concurrent;
 using System.Net;
 using System.Net.WebSockets;
-using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Text.Json.Nodes;
 
-string? certDirOverride = null;
 int httpPort = 5051;
 int wssPort = 5050;
 
@@ -13,9 +11,6 @@ for (int i = 0; i < args.Length; i++)
 {
     switch (args[i])
     {
-        case "--cert-dir":
-            certDirOverride = Path.GetFullPath(args[++i]);
-            break;
         case "--http-port":
             httpPort = int.Parse(args[++i]);
             break;
@@ -29,61 +24,14 @@ for (int i = 0; i < args.Length; i++)
     }
 }
 
-// Default search order: explicit override → cwd/../TextRPG/.certs → exe/../TextRPG/.certs.
-// `dotnet run` puts cwd at the project folder, but a published exe lives several dirs deeper,
-// so we try both and pick the first that has both PEM files.
-string[] candidates = certDirOverride is not null
-    ? [certDirOverride]
-    :
-    [
-        Path.GetFullPath(Path.Combine(Environment.CurrentDirectory, "..", "TextRPG", ".certs")),
-        Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "TextRPG", ".certs")),
-    ];
-
-string? certDir = null;
-string? certPath = null;
-string? keyPath = null;
-foreach (var dir in candidates)
-{
-    var c = Path.Combine(dir, "dev.pem");
-    var k = Path.Combine(dir, "dev-key.pem");
-    if (File.Exists(c) && File.Exists(k))
-    {
-        certDir = dir;
-        certPath = c;
-        keyPath = k;
-        break;
-    }
-}
-
-if (certDir is null || certPath is null || keyPath is null)
-{
-    Console.Error.WriteLine("[bridge] cert not found. Searched:");
-    foreach (var dir in candidates) Console.Error.WriteLine($"  {dir}");
-    Console.Error.WriteLine("[bridge] run TextRPG `npm start` once to generate dev.pem / dev-key.pem, or pass --cert-dir <path>.");
-    return 2;
-}
-
-X509Certificate2 cert;
-try
-{
-    using var pemCert = X509Certificate2.CreateFromPemFile(certPath, keyPath);
-    // PFX round-trip — Kestrel needs the key marshalled into a usable container on Windows.
-    cert = X509CertificateLoader.LoadPkcs12(pemCert.Export(X509ContentType.Pfx), password: null);
-}
-catch (Exception e)
-{
-    Console.Error.WriteLine($"[bridge] failed to load cert: {e.Message}");
-    return 3;
-}
-
 var builder = WebApplication.CreateBuilder();
 builder.Logging.ClearProviders();
 builder.Logging.AddSimpleConsole(o => { o.SingleLine = true; o.TimestampFormat = "HH:mm:ss "; });
 builder.WebHost.ConfigureKestrel(options =>
 {
-    options.Listen(IPAddress.Loopback, httpPort);
-    options.Listen(IPAddress.Loopback, wssPort, listen => listen.UseHttps(cert));
+    options.Listen(IPAddress.Any, httpPort);
+    // Plain ws — nginx terminates TLS upstream; port keeps the 'wss' name for the app contract.
+    options.Listen(IPAddress.Any, wssPort);
 });
 
 var state = new BridgeState(wssPort);
@@ -376,9 +324,8 @@ app.Map("/app", async (HttpContext ctx, BridgeState s) =>
     await s.HandleAppConnectionAsync(ws, ctx.RequestAborted);
 });
 
-Console.WriteLine($"[bridge] http  listening on http://127.0.0.1:{httpPort}  (agent → /send /list /delete /reload /clients /book/*)");
-Console.WriteLine($"[bridge] wss   listening on wss://127.0.0.1:{wssPort}/app  (app  → WebSocket; multi-client by hello frame's clientId)");
-Console.WriteLine($"[bridge] cert  {certPath}");
+Console.WriteLine($"[bridge] http  listening on http://0.0.0.0:{httpPort}  (agent → /send /list /delete /reload /clients /book/*)");
+Console.WriteLine($"[bridge] ws    listening on ws://0.0.0.0:{wssPort}/app  (app  → WebSocket; multi-client by hello frame's clientId; nginx adds TLS)");
 
 await app.RunAsync();
 return 0;
@@ -401,12 +348,11 @@ static void PrintUsage()
 {
     Console.WriteLine("BridgeServer — TextRPG dev relay");
     Console.WriteLine();
-    Console.WriteLine("Usage: BridgeServer [--cert-dir <path>] [--http-port <n>] [--wss-port <n>]");
+    Console.WriteLine("Usage: BridgeServer [--http-port <n>] [--wss-port <n>]");
     Console.WriteLine();
     Console.WriteLine("Defaults:");
-    Console.WriteLine("  --cert-dir   ../TextRPG/.certs  (relative to executable)");
-    Console.WriteLine("  --http-port  5051               (plain http, agent-facing)");
-    Console.WriteLine("  --wss-port   5050               (https/wss, app-facing)");
+    Console.WriteLine("  --http-port  5051  (plain http, agent-facing)");
+    Console.WriteLine("  --wss-port   5050  (plain ws, app-facing; nginx adds TLS)");
 }
 
 sealed class BridgeState(int wssPort)
