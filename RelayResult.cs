@@ -26,7 +26,7 @@ sealed record RelayResult(bool IsError, JsonNode? Value, string? Code, JsonObjec
             };
         }
 
-        var body = ErrorFields is null ? new JsonObject() : (JsonObject)ErrorFields.DeepClone();
+        var body = ErrorFields is null ? [] : (JsonObject)ErrorFields.DeepClone();
         body["error"] = Code;
         return new CallToolResult
         {

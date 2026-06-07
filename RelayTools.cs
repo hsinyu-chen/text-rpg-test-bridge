@@ -1,4 +1,6 @@
 using System.ComponentModel;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json.Nodes;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
@@ -13,11 +15,39 @@ using ModelContextProtocol.Server;
 [McpServerToolType]
 sealed class RelayTools
 {
+    // Auth is enforced per TOOL CALL (here), NOT at the HTTP layer. An HTTP 401/403 on
+    // the MCP handshake makes clients (e.g. VS Code) launch the OAuth/Dynamic-Client-
+    // Registration flow or fail their initial header-less probe, so the protocol surface
+    // (initialize / tools.list) must stay open — only an actual tool invocation requires
+    // the Bearer token. IHttpContextAccessor is a singleton backed by AsyncLocal, so a
+    // static reference safely yields the *current* request's context. Set once at startup.
+    private static IHttpContextAccessor? _http;
+    private static byte[]? _tokenBytes;
+
+    public static void Configure(IHttpContextAccessor http, string token)
+    {
+        _http = http;
+        _tokenBytes = Encoding.UTF8.GetBytes(token);
+    }
+
+    private static bool IsAuthorized()
+    {
+        var ctx = _http?.HttpContext;
+        if (ctx is null || _tokenBytes is null) return false;
+        var header = ctx.Request.Headers.Authorization.ToString();
+        const string scheme = "Bearer ";
+        if (!header.StartsWith(scheme, StringComparison.OrdinalIgnoreCase)) return false;
+        var presented = header[scheme.Length..].Trim();
+        return presented.Length > 0
+            && CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(presented), _tokenBytes);
+    }
+
     // Shared call path: build the WS frame payload, hand it to the relay, and
     // turn the domain result into MCP content (success) or an MCP error result
     // (failure) that preserves the legacy error `code` + extra fields verbatim.
     private static async Task<CallToolResult> Relay(BridgeState state, string type, JsonObject payload, string? clientId, CancellationToken ct)
     {
+        if (!IsAuthorized()) return RelayResult.Error("unauthorized").ToCallToolResult();
         try
         {
             if (!string.IsNullOrWhiteSpace(clientId)) payload["clientId"] = clientId;
@@ -38,7 +68,7 @@ sealed class RelayTools
         }
     }
 
-    private static JsonObject Obj() => new();
+    private static JsonObject Obj() => [];
 
     [McpServerTool(Name = "send"), Description("Drive one real GameEngine turn: send userInput (optionally with an intent) and get back the produced user/model message pair.")]
     public static Task<CallToolResult> Send(
@@ -97,6 +127,7 @@ sealed class RelayTools
     [McpServerTool(Name = "clients"), Description("List the clientIds of currently-connected app instances. Use to disambiguate routing when multiple are live.")]
     public static CallToolResult Clients(BridgeState state)
     {
+        if (!IsAuthorized()) return RelayResult.Error("unauthorized").ToCallToolResult();
         var arr = new JsonArray();
         foreach (var id in state.ListClients()) arr.Add(id);
         var payload = new JsonObject { ["clients"] = arr };
