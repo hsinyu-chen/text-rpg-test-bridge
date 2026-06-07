@@ -16,7 +16,7 @@ FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
 WORKDIR /app
 COPY --from=build /app/publish ./
 
-# 5051 = MCP-over-HTTP (agent), 5050 = WS (app). Both plain — TLS terminated by nginx upstream.
-EXPOSE 5050 5051
+# One port serves /app (WS) + /mcp (MCP). Plain — TLS terminated upstream (WebStation / reverse proxy).
+EXPOSE 5050
 
 ENTRYPOINT ["dotnet", "BridgeServer.dll"]

@@ -4,22 +4,24 @@ A small .NET 10 web app that lets an external agent drive a running
 [TextRPG](https://github.com/hsinyu-chen/text-rpg) build, instead of
 copy/pasting LLM output back and forth.
 
-- Agent ↔ server: native **MCP-over-HTTP** on port `5051` at `/mcp`
-  (Streamable HTTP; one MCP tool per former HTTP route)
-- App ↔ server: plain **WebSocket** on port `5050` (`/app`)
+Both surfaces share a **single port** `5050`, path-routed:
 
-Both ports are plain — no TLS. Terminate TLS upstream (e.g. nginx) if you need it.
+- Agent ↔ server: native **MCP-over-HTTP** at `/mcp`
+  (Streamable HTTP; one MCP tool per former HTTP route)
+- App ↔ server: plain **WebSocket** at `/app`
+
+The port is plain — no TLS. Terminate TLS upstream (e.g. a reverse proxy) if you need it.
 
 ## Run / deploy
 
 It's an ordinary ASP.NET Core app — deploy it however you like (`dotnet run`,
-`dotnet publish`, or the bundled [`Dockerfile`](Dockerfile)). Optional flags:
-`--http-port` (default `5051`), `--wss-port` (default `5050`).
+`dotnet publish`, or the bundled [`Dockerfile`](Dockerfile)). Optional flag:
+`--port` (default `5050`; serves both `/mcp` and `/app`).
 
 ## MCP access + token auth
 
 The `/mcp` endpoint speaks the standard Model Context Protocol over Streamable
-HTTP — point any MCP client at `http://<host>:5051/mcp`. Each former agent-facing
+HTTP — point any MCP client at `http://<host>:5050/mcp`. Each former agent-facing
 HTTP route is now an MCP tool (`send`, `list`, `delete`, `reload`, `clients`,
 `config_get`/`config_set`, the `profile_*` / `llm_*` / `book_*` / `agent_*`
 families, …). Every tool takes an optional `clientId` for multi-client routing.
@@ -37,7 +39,7 @@ environment variable:
 - A missing or wrong token gets a `401` with a `WWW-Authenticate: Bearer`
   response header and an empty body.
 
-The token gates `/mcp` only — the app-facing WebSocket on `5050/app` is
+The token gates `/mcp` only — the app-facing WebSocket at `/app` (same port) is
 unaffected (it carries no token).
 
 The MCP tool surface and the WebSocket frame contract are the source of truth in

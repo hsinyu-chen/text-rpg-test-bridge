@@ -3,3 +3,6 @@ obj/
 *.user
 .vs/
 *.tar
+Properties/launchSettings.json
+# Local-only: pulls in ~/.claude C# style ref; not present for public-mirror clones.
+CLAUDE.md
