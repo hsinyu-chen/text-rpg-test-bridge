@@ -1,3 +1,5 @@
+using System.Text.Encodings.Web;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using ModelContextProtocol.Protocol;
 /// <summary>
@@ -10,6 +12,10 @@ using ModelContextProtocol.Protocol;
 /// </summary>
 sealed record RelayResult(bool IsError, JsonNode? Value, string? Code, JsonObject? ErrorFields)
 {
+    // UnsafeRelaxedJsonEscaping so non-ASCII game text (CJK) serializes verbatim instead of \uXXXX.
+    private static readonly JsonSerializerOptions JsonOpts =
+        new() { Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+
     public static RelayResult Success(JsonNode? value) => new(false, value, null, null);
 
     public static RelayResult Error(string code, JsonObject? fields = null) => new(true, null, code, fields);
@@ -18,7 +24,7 @@ sealed record RelayResult(bool IsError, JsonNode? Value, string? Code, JsonObjec
     {
         if (!IsError)
         {
-            var json = Value?.ToJsonString() ?? "null";
+            var json = Value?.ToJsonString(JsonOpts) ?? "null";
             return new CallToolResult
             {
                 IsError = false,
@@ -31,7 +37,7 @@ sealed record RelayResult(bool IsError, JsonNode? Value, string? Code, JsonObjec
         return new CallToolResult
         {
             IsError = true,
-            Content = [new TextContentBlock { Text = body.ToJsonString() }],
+            Content = [new TextContentBlock { Text = body.ToJsonString(JsonOpts) }],
         };
     }
 }
