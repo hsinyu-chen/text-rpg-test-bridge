@@ -70,7 +70,7 @@ sealed class RelayTools
 
     private static JsonObject Obj() => [];
 
-    [McpServerTool(Name = "send"), Description("Drive one real GameEngine turn: send userInput (optionally with an intent) and get back the produced user/model message pair.")]
+    [McpServerTool(Name = "send"), Description("Drive one real GameEngine turn: send userInput (optionally with an intent) and get back the produced user/model message pair. The model side returns the turn digest (summary/*_log/content/stat_delta); heavy CoT fields (analysis/thought) are omitted — fetch them via read_message{id}.")]
     public static Task<CallToolResult> Send(
         BridgeState state,
         [Description("The action/line to send. Format ([心境]動作)台詞; empty is valid for continue/fast_forward/system.")] string userInput,
@@ -84,18 +84,37 @@ sealed class RelayTools
         return Relay(state, "send_action", p, clientId, ct);
     }
 
-    [McpServerTool(Name = "list"), Description("List the last N chat messages (id/role/preview, or full turn fields with full=true).")]
+    [McpServerTool(Name = "list"), Description("List a digest of trailing chat messages (id/role/intent/summary/*_log/stat_delta). Heavy fields (content/analysis/thought) are omitted — fetch one message's via read_message{id}. Pages via limit/offset; the response carries total/offset/truncated for paging.")]
     public static Task<CallToolResult> List(
         BridgeState state,
-        [Description("How many trailing messages to return (default 50, capped at 200 app-side).")] int? limit = null,
-        [Description("When true, return full turn fields (analysis/summary/content/*_log) instead of an 80-char preview.")] bool? full = null,
+        [Description("How many trailing messages to return as a digest (default 5, capped at 200 app-side).")] int? limit = null,
+        [Description("How many trailing messages to skip before taking `limit` (default 0); page older messages by raising offset.")] int? offset = null,
         [Description("Target app clientId; omit to auto-route when exactly one client is connected.")] string? clientId = null,
         CancellationToken ct = default)
     {
         var p = Obj();
         if (limit is not null) p["limit"] = limit;
-        if (full is not null) p["full"] = full;
+        if (offset is not null) p["offset"] = offset;
         return Relay(state, "list", p, clientId, ct);
+    }
+
+    [McpServerTool(Name = "read_message"), Description("Read the heavy fields (content/analysis/thought) of ONE chat message by id; companion to the slim `list` digest.")]
+    public static Task<CallToolResult> ReadMessage(
+        BridgeState state,
+        [Description("The message id to read (from a `list` digest).")] string id,
+        [Description("Which heavy fields: any of content/analysis/thought; omit for all.")] string[]? fields = null,
+        [Description("Target app clientId; omit to auto-route when exactly one client is connected.")] string? clientId = null,
+        CancellationToken ct = default)
+    {
+        var p = Obj();
+        p["id"] = id;
+        if (fields is not null)
+        {
+            var arr = new JsonArray();
+            foreach (var f in fields) arr.Add(f);
+            p["fields"] = arr;
+        }
+        return Relay(state, "read_message", p, clientId, ct);
     }
 
     [McpServerTool(Name = "delete"), Description("Delete a message by id, removing its paired sibling too unless alsoDeletePair=false.")]
@@ -174,11 +193,13 @@ sealed class RelayTools
         CancellationToken ct = default)
         => Relay(state, "profile_push_to_disk", Obj(), clientId, ct);
 
-    [McpServerTool(Name = "profile_get_prompt"), Description("Read one resolved prompt for a profile (defaults to active). Returns content + hasOverride.")]
+    [McpServerTool(Name = "profile_get_prompt"), Description("Read one resolved prompt for a profile (defaults to active). Returns a head slice by default (offset/length page the full body) plus hasOverride/totalSize/truncated.")]
     public static Task<CallToolResult> ProfileGetPrompt(
         BridgeState state,
         [Description("The prompt type to read; call profile_get_all_prompts to see the valid types for a profile (its response keys are the authoritative, non-rotting list).")] string promptType,
         [Description("Profile id to read; omit for the active profile.")] string? profileId = null,
+        [Description("Start char index for a paged read (default 0).")] int? offset = null,
+        [Description("Char count to return from offset (default 2000, the head cap).")] int? length = null,
         [Description("Target app clientId; omit to auto-route when exactly one client is connected.")] string? clientId = null,
         CancellationToken ct = default)
     {
@@ -187,18 +208,22 @@ sealed class RelayTools
         var p = Obj();
         p["promptType"] = promptType;
         if (profileId is not null) p["profileId"] = profileId;
+        if (offset is not null) p["offset"] = offset;
+        if (length is not null) p["length"] = length;
         return Relay(state, "profile_get_prompt", p, clientId, ct);
     }
 
-    [McpServerTool(Name = "profile_get_all_prompts"), Description("Read all resolved prompts for a profile (defaults to active), each with content + hasOverride.")]
+    [McpServerTool(Name = "profile_get_all_prompts"), Description("Read all resolved prompts for a profile (defaults to active). Default per-type META only ({length, hasOverride}); pass include=true to also return each {content, hasOverride}.")]
     public static Task<CallToolResult> ProfileGetAllPrompts(
         BridgeState state,
         [Description("Profile id to read; omit for the active profile.")] string? profileId = null,
+        [Description("When true, return each prompt's full content (not just length). Default false (meta only).")] bool? include = null,
         [Description("Target app clientId; omit to auto-route when exactly one client is connected.")] string? clientId = null,
         CancellationToken ct = default)
     {
         var p = Obj();
         if (profileId is not null) p["profileId"] = profileId;
+        if (include is not null) p["include"] = include;
         return Relay(state, "profile_get_all_prompts", p, clientId, ct);
     }
 
@@ -325,24 +350,53 @@ sealed class RelayTools
         CancellationToken ct = default)
         => Relay(state, "kb_list", Obj(), clientId, ct);
 
-    [McpServerTool(Name = "kb_read"), Description("Read the full content of one loaded KB file by filename.")]
+    [McpServerTool(Name = "kb_read"), Description("Read one loaded KB file by filename. Returns a head slice by default (offset/length page the full body) plus totalSize/totalTokens/truncated. Locate matches without dumping via kb_grep.")]
     public static Task<CallToolResult> KbRead(
         BridgeState state,
         [Description("The KB filename to read (must match a loaded entry; filenames are language-bucketed).")] string filename,
+        [Description("Start char index for a paged read (default 0).")] int? offset = null,
+        [Description("Char count to return from offset (default 2000, the head cap).")] int? length = null,
         [Description("Target app clientId; omit to auto-route when exactly one client is connected.")] string? clientId = null,
         CancellationToken ct = default)
     {
         var p = Obj();
         p["filename"] = filename;
+        if (offset is not null) p["offset"] = offset;
+        if (length is not null) p["length"] = length;
         return Relay(state, "kb_read", p, clientId, ct);
     }
 
-    [McpServerTool(Name = "book_list"), Description("List every persisted Book (id/name/messageCount/isActive). Messages are fetched separately via list.")]
-    public static Task<CallToolResult> BookList(
+    [McpServerTool(Name = "kb_grep"), Description("Search one loaded KB file for a pattern; returns only matching line ranges (locate without dumping the whole file). Full content via kb_read.")]
+    public static Task<CallToolResult> KbGrep(
         BridgeState state,
+        [Description("The KB filename to search (must match a loaded entry).")] string filename,
+        [Description("The regex pattern to match lines against.")] string pattern,
+        [Description("Lines of surrounding context per match (default 0).")] int? context = null,
+        [Description("Max matches to return (default 20).")] int? maxMatches = null,
         [Description("Target app clientId; omit to auto-route when exactly one client is connected.")] string? clientId = null,
         CancellationToken ct = default)
-        => Relay(state, "book_list", Obj(), clientId, ct);
+    {
+        var p = Obj();
+        p["filename"] = filename;
+        p["pattern"] = pattern;
+        if (context is not null) p["context"] = context;
+        if (maxMatches is not null) p["maxMatches"] = maxMatches;
+        return Relay(state, "kb_grep", p, clientId, ct);
+    }
+
+    [McpServerTool(Name = "book_list"), Description("List persisted Books (id/name/messageCount/isActive), paged via limit/offset; the response carries total for paging. Messages are fetched separately via list.")]
+    public static Task<CallToolResult> BookList(
+        BridgeState state,
+        [Description("Max books to return after offset (default 50).")] int? limit = null,
+        [Description("How many books to skip from the start of the list (default 0).")] int? offset = null,
+        [Description("Target app clientId; omit to auto-route when exactly one client is connected.")] string? clientId = null,
+        CancellationToken ct = default)
+    {
+        var p = Obj();
+        if (limit is not null) p["limit"] = limit;
+        if (offset is not null) p["offset"] = offset;
+        return Relay(state, "book_list", p, clientId, ct);
+    }
 
     [McpServerTool(Name = "book_active"), Description("Get the currently active Book (id + name + messageCount).")]
     public static Task<CallToolResult> BookActive(
@@ -443,7 +497,7 @@ sealed class RelayTools
         return Relay(state, "agent_get_hint_bbox", p, clientId, ct);
     }
 
-    [McpServerTool(Name = "agent_eval"), Description("Dev-only async JS eval inside the running app (gated by the app's eval toggle). expr is an expression or a block ending in return.")]
+    [McpServerTool(Name = "agent_eval"), Description("Dev-only async JS eval inside the running app (gated by the app's eval toggle). expr is an expression or a block ending in return. The serialized result is capped (array breadth/string length/total size) — large values come back truncated with markers.")]
     public static Task<CallToolResult> AgentEval(
         BridgeState state,
         [Description("JS expression or statement block; bare expressions auto-wrap as return (expr).")] string expr,
@@ -455,7 +509,7 @@ sealed class RelayTools
         return Relay(state, "agent_eval", p, clientId, ct);
     }
 
-    [McpServerTool(Name = "agent_ask"), Description("Run a headless file-agent turn against the active book's KB + chat, returning the full log (tool calls/results/thoughts/final).")]
+    [McpServerTool(Name = "agent_ask"), Description("Run a headless file-agent turn against the active book's KB + chat. Returns finalResponse + replacements + logCount (the per-step log[] is omitted) — drill into the run's log via agent_log_outline then agent_log_read.")]
     public static Task<CallToolResult> AgentAsk(
         BridgeState state,
         [Description("The question/prompt for the file-agent.")] string prompt,
@@ -469,5 +523,24 @@ sealed class RelayTools
         if (mode is not null) p["mode"] = mode;
         if (clearHistory is not null) p["clearHistory"] = clearHistory;
         return Relay(state, "agent_ask", p, clientId, ct);
+    }
+
+    [McpServerTool(Name = "agent_log_outline"), Description("Outline the most recent agent_ask run's log: index + toolName + reason per entry, no bodies. Drill into one via agent_log_read.")]
+    public static Task<CallToolResult> AgentLogOutline(
+        BridgeState state,
+        [Description("Target app clientId; omit to auto-route when exactly one client is connected.")] string? clientId = null,
+        CancellationToken ct = default)
+        => Relay(state, "agent_log_outline", Obj(), clientId, ct);
+
+    [McpServerTool(Name = "agent_log_read"), Description("Read ONE entry of the most recent agent_ask run's log in full (text/thought/tool result) by index from agent_log_outline.")]
+    public static Task<CallToolResult> AgentLogRead(
+        BridgeState state,
+        [Description("The 0-based log entry index from agent_log_outline.")] int index,
+        [Description("Target app clientId; omit to auto-route when exactly one client is connected.")] string? clientId = null,
+        CancellationToken ct = default)
+    {
+        var p = Obj();
+        p["index"] = index;
+        return Relay(state, "agent_log_read", p, clientId, ct);
     }
 }
